@@ -1,4 +1,5 @@
 bin/
+/payment-orchestration
 *.exe
 vendor/
 .env
