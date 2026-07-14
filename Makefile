@@ -4,13 +4,13 @@ build:
 	go build -o bin/payment-orchestration ./cmd/payment-orchestration
 
 test:
-	go test ./... -race -coverprofile=coverage.out -coverpkg=./...
+	go test ./cmd/... ./internal/... -race -coverprofile=coverage.out -coverpkg=./cmd/...,./internal/...
 
 run:
 	go run ./cmd/payment-orchestration
 
 lint:
-	go vet ./...
+	golangci-lint run
 
 docker-build:
 	docker build -t ai-crypto-onramp/payment-orchestration .
