@@ -104,3 +104,79 @@ func TestStoreConcurrent(t *testing.T) {
 		t.Fatalf("history len = %d, want 20", got)
 	}
 }
+
+func TestAddAndListCaptures(t *testing.T) {
+	s := New()
+	s.AddCapture(domain.Capture{ID: "c1", IntentID: "i1", Amount: 100})
+	s.AddCapture(domain.Capture{ID: "c2", IntentID: "i1", Amount: 200})
+	got := s.CapturesFor("i1")
+	if len(got) != 2 {
+		t.Fatalf("len = %d, want 2", len(got))
+	}
+	if len(s.CapturesFor("missing")) != 0 {
+		t.Fatal("expected empty for missing intent")
+	}
+}
+
+func TestAddAndListSettlements(t *testing.T) {
+	s := New()
+	s.AddSettlement(domain.Settlement{ID: "s1", IntentID: "i1", SettledAmount: 100})
+	got := s.SettlementsFor("i1")
+	if len(got) != 1 || got[0].SettledAmount != 100 {
+		t.Fatalf("got %v", got)
+	}
+}
+
+func TestAddAndListRefunds(t *testing.T) {
+	s := New()
+	s.AddRefund(domain.Refund{ID: "r1", IntentID: "i1", Amount: 50})
+	got := s.RefundsFor("i1")
+	if len(got) != 1 || got[0].Amount != 50 {
+		t.Fatalf("got %v", got)
+	}
+}
+
+func TestAddAndListChargebacks(t *testing.T) {
+	s := New()
+	s.AddChargeback(domain.Chargeback{ID: "cb1", IntentID: "i1", CaseRef: "case-1", Stage: domain.StageOpened})
+	got := s.ChargebacksFor("i1")
+	if len(got) != 1 || got[0].CaseRef != "case-1" {
+		t.Fatalf("got %v", got)
+	}
+}
+
+func TestUpdateChargeback(t *testing.T) {
+	s := New()
+	s.AddChargeback(domain.Chargeback{ID: "cb1", IntentID: "i1", CaseRef: "case-1", Stage: domain.StageOpened})
+	if err := s.UpdateChargeback("case-1", func(c *domain.Chargeback) error {
+		c.Stage = domain.StageReversal
+		return nil
+	}); err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	got := s.ChargebacksFor("i1")
+	if got[0].Stage != domain.StageReversal {
+		t.Fatalf("stage = %q", got[0].Stage)
+	}
+	if err := s.UpdateChargeback("missing", func(c *domain.Chargeback) error { return nil }); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestRecordWebhookDedup(t *testing.T) {
+	s := New()
+	w := domain.Webhook{ID: "w1", Rail: domain.RailCard, ExternalEventID: "evt-1"}
+	if err := s.RecordWebhook(w); err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if err := s.RecordWebhook(w); !errors.Is(err, ErrDuplicateWebhook) {
+		t.Fatalf("err = %v, want ErrDuplicateWebhook", err)
+	}
+	if !s.WebhookExists(domain.RailCard, "evt-1") {
+		t.Fatal("webhook should exist")
+	}
+	if s.WebhookExists(domain.RailCard, "evt-2") {
+		t.Fatal("webhook should not exist")
+	}
+	s.MarkWebhookProcessed(domain.RailCard, "evt-1")
+}

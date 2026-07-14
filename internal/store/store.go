@@ -1,20 +1,36 @@
 package store
 
 import (
+	"errors"
 	"sync"
+	"time"
 
 	"github.com/ai-crypto-onramp/payment-orchestration/internal/domain"
 )
 
-// Store is a thread-safe in-memory store of payment intents.
+// Store is a thread-safe in-memory store of payment intents and their
+// associated captures, settlements, refunds, chargebacks, and inbound
+// webhooks.
 type Store struct {
-	mu      sync.RWMutex
-	intents map[string]*domain.Intent
+	mu          sync.RWMutex
+	intents     map[string]*domain.Intent
+	captures    map[string][]domain.Capture
+	settlements map[string][]domain.Settlement
+	refunds     map[string][]domain.Refund
+	chargebacks map[string][]domain.Chargeback
+	webhooks    map[string]domain.Webhook
 }
 
 // New returns an empty in-memory store.
 func New() *Store {
-	return &Store{intents: make(map[string]*domain.Intent)}
+	return &Store{
+		intents:     make(map[string]*domain.Intent),
+		captures:    make(map[string][]domain.Capture),
+		settlements: make(map[string][]domain.Settlement),
+		refunds:     make(map[string][]domain.Refund),
+		chargebacks: make(map[string][]domain.Chargeback),
+		webhooks:    make(map[string]domain.Webhook),
+	}
 }
 
 // CreateIntent stores i. It does not check for duplicates.
@@ -51,12 +67,132 @@ func (s *Store) UpdateIntent(id string, fn func(*domain.Intent) error) (*domain.
 	return cloneIntent(i), nil
 }
 
+// AddCapture records a capture linked to an intent.
+func (s *Store) AddCapture(c domain.Capture) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.captures[c.IntentID] = append(s.captures[c.IntentID], c)
+}
+
+// CapturesFor returns the captures recorded against an intent.
+func (s *Store) CapturesFor(intentID string) []domain.Capture {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]domain.Capture, len(s.captures[intentID]))
+	copy(out, s.captures[intentID])
+	return out
+}
+
+// AddSettlement records a settlement linked to an intent.
+func (s *Store) AddSettlement(set domain.Settlement) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.settlements[set.IntentID] = append(s.settlements[set.IntentID], set)
+}
+
+// SettlementsFor returns the settlements recorded against an intent.
+func (s *Store) SettlementsFor(intentID string) []domain.Settlement {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]domain.Settlement, len(s.settlements[intentID]))
+	copy(out, s.settlements[intentID])
+	return out
+}
+
+// AddRefund records a refund linked to an intent.
+func (s *Store) AddRefund(r domain.Refund) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.refunds[r.IntentID] = append(s.refunds[r.IntentID], r)
+}
+
+// RefundsFor returns the refunds recorded against an intent.
+func (s *Store) RefundsFor(intentID string) []domain.Refund {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]domain.Refund, len(s.refunds[intentID]))
+	copy(out, s.refunds[intentID])
+	return out
+}
+
+// AddChargeback records a chargeback linked to an intent.
+func (s *Store) AddChargeback(c domain.Chargeback) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.chargebacks[c.IntentID] = append(s.chargebacks[c.IntentID], c)
+}
+
+// ChargebacksFor returns the chargebacks recorded against an intent.
+func (s *Store) ChargebacksFor(intentID string) []domain.Chargeback {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]domain.Chargeback, len(s.chargebacks[intentID]))
+	copy(out, s.chargebacks[intentID])
+	return out
+}
+
+// UpdateChargeback applies fn to the chargeback with the given case ref.
+func (s *Store) UpdateChargeback(caseRef string, fn func(*domain.Chargeback) error) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for intentID, list := range s.chargebacks {
+		for idx := range list {
+			if list[idx].CaseRef == caseRef {
+				return fn(&s.chargebacks[intentID][idx])
+			}
+		}
+	}
+	return ErrNotFound
+}
+
+// RecordWebhook persists a webhook record keyed by (rail, external_event_id).
+// It returns ErrDuplicateWebhook if a record with the same key already exists.
+func (s *Store) RecordWebhook(w domain.Webhook) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := webhookKey(w.Rail, w.ExternalEventID)
+	if _, ok := s.webhooks[key]; ok {
+		return ErrDuplicateWebhook
+	}
+	s.webhooks[key] = w
+	return nil
+}
+
+// MarkWebhookProcessed records that the webhook with (rail, external_event_id)
+// has been processed.
+func (s *Store) MarkWebhookProcessed(rail domain.Rail, externalEventID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := webhookKey(rail, externalEventID)
+	if w, ok := s.webhooks[key]; ok {
+		w.ProcessedAt = time.Now().UTC()
+		s.webhooks[key] = w
+	}
+}
+
+// WebhookExists reports whether a webhook with the given (rail, external_event_id)
+// has already been recorded.
+func (s *Store) WebhookExists(rail domain.Rail, externalEventID string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	_, ok := s.webhooks[webhookKey(rail, externalEventID)]
+	return ok
+}
+
 // ErrNotFound is returned when an intent is not present in the store.
 var ErrNotFound = errNotFound{}
+
+// ErrDuplicateWebhook is returned when a webhook with the same (rail,
+// external_event_id) is recorded twice.
+var ErrDuplicateWebhook = errors.New("duplicate webhook")
 
 type errNotFound struct{}
 
 func (errNotFound) Error() string { return "intent not found" }
+
+func webhookKey(rail domain.Rail, externalEventID string) string {
+	return string(rail) + "\x00" + externalEventID
+}
 
 // cloneIntent returns a deep copy of i safe to return to callers.
 func cloneIntent(i *domain.Intent) *domain.Intent {

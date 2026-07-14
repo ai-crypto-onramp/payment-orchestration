@@ -24,14 +24,28 @@ func TestIsValidRail(t *testing.T) {
 	}
 }
 
+func TestIsInstant(t *testing.T) {
+	for _, r := range []Rail{RailPIX, RailUPI} {
+		if !r.IsInstant() {
+			t.Errorf("%q should be instant", r)
+		}
+	}
+	for _, r := range []Rail{RailCard, RailACH, RailSEPA} {
+		if r.IsInstant() {
+			t.Errorf("%q should not be instant", r)
+		}
+	}
+}
+
 func TestIsTerminal(t *testing.T) {
-	terminal := []Status{StatusSettled, StatusRefunded, StatusVoided, StatusFailed}
+	terminal := []Status{StatusSettled, StatusRefunded, StatusVoided, StatusFailed,
+		StatusChargebackWon, StatusChargebackLost}
 	for _, s := range terminal {
 		if !s.IsTerminal() {
 			t.Errorf("%q should be terminal", s)
 		}
 	}
-	nonTerminal := []Status{StatusIntent, StatusAuthorized, Status3DSPending, StatusCaptured, StatusRefunding}
+	nonTerminal := []Status{StatusIntent, StatusAuthorized, Status3DSPending, StatusCaptured, StatusRefunding, StatusChargedBack}
 	for _, s := range nonTerminal {
 		if s.IsTerminal() {
 			t.Errorf("%q should not be terminal", s)
@@ -67,6 +81,11 @@ func TestCanTransition(t *testing.T) {
 		{StatusRefunding, StatusFailed, true},
 		{StatusRefunded, StatusAuthorized, false},
 		{StatusFailed, StatusAuthorized, false},
+		{StatusCaptured, StatusChargedBack, true},
+		{StatusSettled, StatusChargedBack, true},
+		{StatusChargedBack, StatusChargebackWon, true},
+		{StatusChargedBack, StatusChargebackLost, true},
+		{StatusChargedBack, StatusAuthorized, false},
 	}
 	for _, tt := range tests {
 		if got := tt.from.CanTransition(tt.to); got != tt.want {

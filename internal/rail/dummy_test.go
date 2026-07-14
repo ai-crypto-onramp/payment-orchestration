@@ -45,6 +45,35 @@ func TestDummyRefund(t *testing.T) {
 	}
 }
 
+func TestDummySubmit(t *testing.T) {
+	d := NewDummy()
+	i := &domain.Intent{ID: "i1", Amount: 500}
+	if err := d.Submit(i); err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if i.CapturedAmount != 500 {
+		t.Fatalf("captured = %d, want 500", i.CapturedAmount)
+	}
+	if i.ExternalID == "" {
+		t.Fatal("ExternalID should be set")
+	}
+	d.FailAuthorize = true
+	if err := d.Submit(&domain.Intent{ID: "i2"}); !errors.Is(err, ErrAuthorize) {
+		t.Fatalf("err = %v, want ErrAuthorize", err)
+	}
+}
+
+func TestDummyVoid(t *testing.T) {
+	d := NewDummy()
+	if err := d.Void(&domain.Intent{}); err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	d.FailVoid = true
+	if err := d.Void(&domain.Intent{}); !errors.Is(err, ErrVoid) {
+		t.Fatalf("err = %v, want ErrVoid", err)
+	}
+}
+
 func TestDummyVerify3DS(t *testing.T) {
 	d := NewDummy()
 	card := &domain.Intent{Rail: domain.RailCard}

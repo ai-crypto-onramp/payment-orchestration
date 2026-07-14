@@ -13,25 +13,29 @@ type Adapter interface {
 	Authorize(i *domain.Intent) error
 	Capture(i *domain.Intent, amount int64) error
 	Refund(i *domain.Intent, amount int64) error
+	Submit(i *domain.Intent) error
+	Void(i *domain.Intent) error
 	Verify3DS(i *domain.Intent, challengeResult string) error
 }
 
 // Sentinel errors returned by adapters.
 var (
-	ErrAuthorize    = errors.New("rail authorize failed")
-	ErrCapture      = errors.New("rail capture failed")
-	ErrRefund       = errors.New("rail refund failed")
-	Err3DSVerify    = errors.New("rail 3ds verification failed")
+	ErrAuthorize      = errors.New("rail authorize failed")
+	ErrCapture        = errors.New("rail capture failed")
+	ErrRefund         = errors.New("rail refund failed")
+	ErrVoid           = errors.New("rail void failed")
+	Err3DSVerify      = errors.New("rail 3ds verification failed")
 	ErrUnsupported3DS = errors.New("rail does not support 3ds")
 )
 
 // DummyAdapter is the single dummy rail implementation. It succeeds at every
-// operation unless FailAuthorize/FailCapture/FailRefund/Fail3DS is set (useful
-// for testing failure paths). All rails map to the same instance.
+// operation unless FailAuthorize/FailCapture/FailRefund/Fail3DS/FailVoid is set
+// (useful for testing failure paths). All rails map to the same instance.
 type DummyAdapter struct {
 	FailAuthorize bool
 	FailCapture   bool
 	FailRefund    bool
+	FailVoid      bool
 	Fail3DS       bool
 }
 
@@ -56,6 +60,25 @@ func (d *DummyAdapter) Capture(i *domain.Intent, amount int64) error {
 func (d *DummyAdapter) Refund(i *domain.Intent, amount int64) error {
 	if d.FailRefund {
 		return ErrRefund
+	}
+	return nil
+}
+
+// Submit collapses auth+capture into a single step for instant rails (PIX, UPI)
+// and bank rails (ACH, SEPA). The intent lands directly in captured.
+func (d *DummyAdapter) Submit(i *domain.Intent) error {
+	if d.FailAuthorize {
+		return ErrAuthorize
+	}
+	i.ExternalID = "ext-" + i.ID
+	i.CapturedAmount = i.Amount
+	return nil
+}
+
+// Void cancels a previously authorized but not-yet-captured intent.
+func (d *DummyAdapter) Void(i *domain.Intent) error {
+	if d.FailVoid {
+		return ErrVoid
 	}
 	return nil
 }

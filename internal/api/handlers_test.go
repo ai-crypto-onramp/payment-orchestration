@@ -10,9 +10,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/ai-crypto-onramp/payment-orchestration/internal/audit"
 	"github.com/ai-crypto-onramp/payment-orchestration/internal/domain"
+	"github.com/ai-crypto-onramp/payment-orchestration/internal/fraud"
 	"github.com/ai-crypto-onramp/payment-orchestration/internal/rail"
 	"github.com/ai-crypto-onramp/payment-orchestration/internal/store"
 )
@@ -802,5 +804,397 @@ func TestRoutingUnknown(t *testing.T) {
 	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/nope", nil))
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("code = %d, want 404", rec.Code)
+	}
+}
+
+// --- void endpoint tests ---
+
+func TestVoidHappyPath(t *testing.T) {
+	svc, _, st := newTestService(t, rail.NewDummy())
+	mux := NewMux(svc)
+
+	rec1 := doJSON(t, mux, http.MethodPost, "/v1/payments/intents", "k", map[string]interface{}{
+		"rail": "card", "amount": 1000, "currency": "USD", "payer_ref": "p1",
+	})
+	id := decodeBody(t, rec1)["id"].(string)
+
+	rec2 := doJSON(t, mux, http.MethodPost, "/v1/payments/"+id+"/void", "v1", map[string]interface{}{})
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("code = %d (body=%s)", rec2.Code, rec2.Body.String())
+	}
+	if st.GetIntent(id).Status != domain.StatusVoided {
+		t.Fatalf("status = %q, want voided", st.GetIntent(id).Status)
+	}
+
+	// Idempotency replay.
+	rec3 := doJSON(t, mux, http.MethodPost, "/v1/payments/"+id+"/void", "v1", map[string]interface{}{})
+	if rec3.Header().Get("Idempotency-Replay") != "true" {
+		t.Fatal("expected replay")
+	}
+}
+
+func TestVoidWrongState(t *testing.T) {
+	svc, _, _ := newTestService(t, rail.NewDummy())
+	mux := NewMux(svc)
+
+	rec1 := doJSON(t, mux, http.MethodPost, "/v1/payments/intents", "k", map[string]interface{}{
+		"rail": "card", "amount": 1000, "currency": "USD", "payer_ref": "p1",
+	})
+	id := decodeBody(t, rec1)["id"].(string)
+	doJSON(t, mux, http.MethodPost, "/v1/payments/"+id+"/capture", "c", map[string]interface{}{})
+
+	rec2 := doJSON(t, mux, http.MethodPost, "/v1/payments/"+id+"/void", "v1", map[string]interface{}{})
+	if rec2.Code != http.StatusConflict {
+		t.Fatalf("code = %d, want 409 (void after capture)", rec2.Code)
+	}
+}
+
+func TestVoidRailFailure(t *testing.T) {
+	dummy := rail.NewDummy()
+	dummy.FailVoid = true
+	svc, _, _ := newTestService(t, dummy)
+	mux := NewMux(svc)
+
+	rec1 := doJSON(t, mux, http.MethodPost, "/v1/payments/intents", "k", map[string]interface{}{
+		"rail": "card", "amount": 1000, "currency": "USD", "payer_ref": "p1",
+	})
+	id := decodeBody(t, rec1)["id"].(string)
+
+	rec2 := doJSON(t, mux, http.MethodPost, "/v1/payments/"+id+"/void", "v1", map[string]interface{}{})
+	if rec2.Code != http.StatusBadGateway {
+		t.Fatalf("code = %d, want 502", rec2.Code)
+	}
+}
+
+func TestVoidNotFound(t *testing.T) {
+	svc, _, _ := newTestService(t, rail.NewDummy())
+	mux := NewMux(svc)
+	rec := doJSON(t, mux, http.MethodPost, "/v1/payments/missing/void", "v", map[string]interface{}{})
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("code = %d, want 404", rec.Code)
+	}
+}
+
+// --- instant rail tests ---
+
+func TestCreateIntentInstantRail(t *testing.T) {
+	svc, _, st := newTestService(t, rail.NewDummy())
+	mux := NewMux(svc)
+
+	rec := doJSON(t, mux, http.MethodPost, "/v1/payments/intents", "pix-1", map[string]interface{}{
+		"rail": "pix", "amount": 500, "currency": "BRL", "payer_ref": "p1",
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("code = %d (body=%s)", rec.Code, rec.Body.String())
+	}
+	body := decodeBody(t, rec)
+	id := body["id"].(string)
+	if body["status"] != string(domain.StatusCaptured) {
+		t.Fatalf("status = %v, want captured (instant rail collapse)", body["status"])
+	}
+	if st.GetIntent(id).CapturedAmount != 500 {
+		t.Fatalf("captured = %d, want 500", st.GetIntent(id).CapturedAmount)
+	}
+	caps := st.CapturesFor(id)
+	if len(caps) != 1 {
+		t.Fatalf("captures = %d, want 1", len(caps))
+	}
+}
+
+func TestCreateIntentUPIInstant(t *testing.T) {
+	svc, _, _ := newTestService(t, rail.NewDummy())
+	mux := NewMux(svc)
+	rec := doJSON(t, mux, http.MethodPost, "/v1/payments/intents", "upi-1", map[string]interface{}{
+		"rail": "upi", "amount": 300, "currency": "INR", "payer_ref": "p1",
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("code = %d", rec.Code)
+	}
+	if decodeBody(t, rec)["status"] != string(domain.StatusCaptured) {
+		t.Fatal("UPI should collapse to captured")
+	}
+}
+
+// --- fraud gating tests ---
+
+func TestCreateIntentFraudBlocked(t *testing.T) {
+	svc, _, _ := newTestService(t, rail.NewDummy())
+	svc.Fraud = &fraud.DummyClient{FailScore: true}
+	mux := NewMux(svc)
+
+	rec := doJSON(t, mux, http.MethodPost, "/v1/payments/intents", "k", map[string]interface{}{
+		"rail": "card", "amount": 500, "currency": "USD", "payer_ref": "p1",
+	})
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("code = %d, want 403 (fraud blocked)", rec.Code)
+	}
+	body := decodeBody(t, rec)
+	if msg, _ := body["error"].(string); msg == "" {
+		t.Fatal("expected error message in body")
+	}
+}
+
+// --- settlement webhook tests ---
+
+func TestWebhookSettlementTransition(t *testing.T) {
+	svc, _, st := newTestService(t, rail.NewDummy())
+	mux := NewMux(svc)
+
+	rec1 := doJSON(t, mux, http.MethodPost, "/v1/payments/intents", "k", map[string]interface{}{
+		"rail": "card", "amount": 1000, "currency": "USD", "payer_ref": "p1",
+	})
+	id := decodeBody(t, rec1)["id"].(string)
+	doJSON(t, mux, http.MethodPost, "/v1/payments/"+id+"/capture", "c", map[string]interface{}{})
+
+	payload := map[string]interface{}{
+		"payment_id": id, "type": "settlement", "amount": 1000,
+		"external_event_id": "evt-set-1", "rail_ref": "ref-1",
+	}
+	body, _ := json.Marshal(payload)
+	req := httptest.NewRequest(http.MethodPost, "/v1/webhooks/card", bytes.NewReader(body))
+	req.Header.Set("X-Webhook-Signature", signBody([]byte("dev-secret"), body))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code = %d (body=%s)", rec.Code, rec.Body.String())
+	}
+	if st.GetIntent(id).Status != domain.StatusSettled {
+		t.Fatalf("status = %q, want settled", st.GetIntent(id).Status)
+	}
+	if st.GetIntent(id).SettledAmount != 1000 {
+		t.Fatalf("settled = %d", st.GetIntent(id).SettledAmount)
+	}
+	if len(st.SettlementsFor(id)) != 1 {
+		t.Fatalf("settlements = %d, want 1", len(st.SettlementsFor(id)))
+	}
+}
+
+func TestWebhookSettlementReconciliationBreak(t *testing.T) {
+	svc, _, st := newTestService(t, rail.NewDummy())
+	mux := NewMux(svc)
+
+	rec1 := doJSON(t, mux, http.MethodPost, "/v1/payments/intents", "k", map[string]interface{}{
+		"rail": "card", "amount": 1000, "currency": "USD", "payer_ref": "p1",
+	})
+	id := decodeBody(t, rec1)["id"].(string)
+	doJSON(t, mux, http.MethodPost, "/v1/payments/"+id+"/capture", "c", map[string]interface{}{})
+
+	payload := map[string]interface{}{
+		"payment_id": id, "type": "settlement", "amount": 900,
+		"external_event_id": "evt-set-break", "rail_ref": "ref-1",
+	}
+	body, _ := json.Marshal(payload)
+	req := httptest.NewRequest(http.MethodPost, "/v1/webhooks/card", bytes.NewReader(body))
+	req.Header.Set("X-Webhook-Signature", signBody([]byte("dev-secret"), body))
+	mux.ServeHTTP(httptest.NewRecorder(), req)
+
+	i := st.GetIntent(id)
+	found := false
+	for _, e := range i.History {
+		if e.Type == domain.EventReconciliation {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("expected reconciliation break event in history")
+	}
+}
+
+// --- webhook dedup tests ---
+
+func TestWebhookDedup(t *testing.T) {
+	svc, _, _ := newTestService(t, rail.NewDummy())
+	mux := NewMux(svc)
+
+	payload := map[string]interface{}{"type": "ping", "external_event_id": "evt-dup-1"}
+	body, _ := json.Marshal(payload)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/webhooks/card", bytes.NewReader(body))
+	req.Header.Set("X-Webhook-Signature", signBody([]byte("dev-secret"), body))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("first code = %d", rec.Code)
+	}
+	body1 := rec.Body.String()
+
+	// Replay same event id.
+	req2 := httptest.NewRequest(http.MethodPost, "/v1/webhooks/card", bytes.NewReader(body))
+	req2.Header.Set("X-Webhook-Signature", signBody([]byte("dev-secret"), body))
+	rec2 := httptest.NewRecorder()
+	mux.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("second code = %d", rec2.Code)
+	}
+	if decodeBody(t, rec2)["status"] != "duplicate" {
+		t.Fatalf("second status = %v, want duplicate", decodeBody(t, rec2)["status"])
+	}
+	_ = body1
+}
+
+// --- replay window tests ---
+
+func TestWebhookReplayWindow(t *testing.T) {
+	svc, _, _ := newTestService(t, rail.NewDummy())
+	mux := NewMux(svc)
+
+	old := time.Now().Unix() - 3600 // 1h ago
+	payload := map[string]interface{}{"type": "ping", "timestamp": old}
+	body, _ := json.Marshal(payload)
+	req := httptest.NewRequest(http.MethodPost, "/v1/webhooks/card", bytes.NewReader(body))
+	req.Header.Set("X-Webhook-Signature", signBody([]byte("dev-secret"), body))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("code = %d, want 401 (outside replay window)", rec.Code)
+	}
+}
+
+func TestWebhookWithinReplayWindow(t *testing.T) {
+	svc, _, _ := newTestService(t, rail.NewDummy())
+	mux := NewMux(svc)
+
+	now := time.Now().Unix()
+	payload := map[string]interface{}{"type": "ping", "timestamp": now}
+	body, _ := json.Marshal(payload)
+	req := httptest.NewRequest(http.MethodPost, "/v1/webhooks/card", bytes.NewReader(body))
+	req.Header.Set("X-Webhook-Signature", signBody([]byte("dev-secret"), body))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code = %d, want 200 (within replay window)", rec.Code)
+	}
+}
+
+// --- chargeback webhook tests ---
+
+func TestWebhookChargebackOpened(t *testing.T) {
+	svc, _, st := newTestService(t, rail.NewDummy())
+	mux := NewMux(svc)
+
+	rec1 := doJSON(t, mux, http.MethodPost, "/v1/payments/intents", "k", map[string]interface{}{
+		"rail": "card", "amount": 1000, "currency": "USD", "payer_ref": "p1",
+	})
+	id := decodeBody(t, rec1)["id"].(string)
+	doJSON(t, mux, http.MethodPost, "/v1/payments/"+id+"/capture", "c", map[string]interface{}{})
+
+	payload := map[string]interface{}{
+		"payment_id": id, "type": "chargeback", "amount": 1000,
+		"reason": "fraud", "stage": "opened", "case_ref": "case-1",
+		"external_event_id": "evt-cb-1",
+	}
+	body, _ := json.Marshal(payload)
+	req := httptest.NewRequest(http.MethodPost, "/v1/webhooks/card", bytes.NewReader(body))
+	req.Header.Set("X-Webhook-Signature", signBody([]byte("dev-secret"), body))
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code = %d (body=%s)", rec.Code, rec.Body.String())
+	}
+	if st.GetIntent(id).Status != domain.StatusChargedBack {
+		t.Fatalf("status = %q, want charged_back", st.GetIntent(id).Status)
+	}
+	cbs := st.ChargebacksFor(id)
+	if len(cbs) != 1 || cbs[0].CaseRef != "case-1" {
+		t.Fatalf("chargebacks = %v", cbs)
+	}
+}
+
+func TestWebhookChargebackReversalLost(t *testing.T) {
+	svc, _, st := newTestService(t, rail.NewDummy())
+	mux := NewMux(svc)
+
+	rec1 := doJSON(t, mux, http.MethodPost, "/v1/payments/intents", "k", map[string]interface{}{
+		"rail": "card", "amount": 1000, "currency": "USD", "payer_ref": "p1",
+	})
+	id := decodeBody(t, rec1)["id"].(string)
+	doJSON(t, mux, http.MethodPost, "/v1/payments/"+id+"/capture", "c", map[string]interface{}{})
+
+	// Open.
+	open := map[string]interface{}{
+		"payment_id": id, "type": "chargeback", "amount": 1000,
+		"stage": "opened", "case_ref": "case-2", "external_event_id": "evt-open",
+	}
+	body, _ := json.Marshal(open)
+	req := httptest.NewRequest(http.MethodPost, "/v1/webhooks/card", bytes.NewReader(body))
+	req.Header.Set("X-Webhook-Signature", signBody([]byte("dev-secret"), body))
+	mux.ServeHTTP(httptest.NewRecorder(), req)
+
+	// Reversal (lost, amount > 0).
+	rev := map[string]interface{}{
+		"payment_id": id, "type": "chargeback", "amount": 1000,
+		"stage": "reversal", "case_ref": "case-2", "external_event_id": "evt-rev",
+	}
+	body2, _ := json.Marshal(rev)
+	req2 := httptest.NewRequest(http.MethodPost, "/v1/webhooks/card", bytes.NewReader(body2))
+	req2.Header.Set("X-Webhook-Signature", signBody([]byte("dev-secret"), body2))
+	mux.ServeHTTP(httptest.NewRecorder(), req2)
+
+	if st.GetIntent(id).Status != domain.StatusChargebackLost {
+		t.Fatalf("status = %q, want chargeback_lost", st.GetIntent(id).Status)
+	}
+}
+
+func TestWebhookChargebackReversalWon(t *testing.T) {
+	svc, _, st := newTestService(t, rail.NewDummy())
+	mux := NewMux(svc)
+
+	rec1 := doJSON(t, mux, http.MethodPost, "/v1/payments/intents", "k", map[string]interface{}{
+		"rail": "card", "amount": 1000, "currency": "USD", "payer_ref": "p1",
+	})
+	id := decodeBody(t, rec1)["id"].(string)
+	doJSON(t, mux, http.MethodPost, "/v1/payments/"+id+"/capture", "c", map[string]interface{}{})
+
+	open := map[string]interface{}{
+		"payment_id": id, "type": "chargeback", "amount": 1000,
+		"stage": "opened", "case_ref": "case-3", "external_event_id": "evt-open3",
+	}
+	body, _ := json.Marshal(open)
+	req := httptest.NewRequest(http.MethodPost, "/v1/webhooks/card", bytes.NewReader(body))
+	req.Header.Set("X-Webhook-Signature", signBody([]byte("dev-secret"), body))
+	mux.ServeHTTP(httptest.NewRecorder(), req)
+
+	// Reversal won (amount = 0).
+	rev := map[string]interface{}{
+		"payment_id": id, "type": "chargeback", "amount": 0,
+		"stage": "reversal", "case_ref": "case-3", "external_event_id": "evt-rev3",
+	}
+	body2, _ := json.Marshal(rev)
+	req2 := httptest.NewRequest(http.MethodPost, "/v1/webhooks/card", bytes.NewReader(body2))
+	req2.Header.Set("X-Webhook-Signature", signBody([]byte("dev-secret"), body2))
+	mux.ServeHTTP(httptest.NewRecorder(), req2)
+
+	if st.GetIntent(id).Status != domain.StatusChargebackWon {
+		t.Fatalf("status = %q, want chargeback_won", st.GetIntent(id).Status)
+	}
+}
+
+// --- metrics endpoint test ---
+
+func TestMetricsEndpoint(t *testing.T) {
+	svc, _, _ := newTestService(t, rail.NewDummy())
+	mux := NewMux(svc)
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code = %d", rec.Code)
+	}
+	body := rec.Body.String()
+	if !AssertBodyContains([]byte(body), "transitions") {
+		t.Fatalf("metrics body missing transitions: %s", body)
+	}
+}
+
+// --- request log middleware test ---
+
+func TestRequestLogMiddleware(t *testing.T) {
+	svc, _, _ := newTestService(t, rail.NewDummy())
+	mux := NewMux(svc)
+	wrapped := svc.RequestLogMiddleware(mux)
+	rec := httptest.NewRecorder()
+	wrapped.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code = %d", rec.Code)
 	}
 }
