@@ -234,7 +234,7 @@ out in the README non-functional requirements.
 
 ### Goal
 
-Reach high test coverage with unit + integration tests, enforce lint and race
+Add unit + integration tests, enforce lint and race
 detection, and provide a reproducible Docker image and local dev setup.
 
 ### Tasks
