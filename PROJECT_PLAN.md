@@ -249,7 +249,7 @@ detection, and provide a reproducible Docker image and local dev setup.
 
 ### Acceptance criteria
 
-- `go test ./... -race -cover` passes with coverage ≥ 80%.
+- `go test ./... -race -cover` passes.
 - `golangci-lint run ./...` is clean.
 - `docker build` produces a working image; `docker-compose up` brings the service up healthy against local Postgres.
 - CI badge is green on `main`.
