@@ -1198,3 +1198,33 @@ func TestRequestLogMiddleware(t *testing.T) {
 		t.Fatalf("code = %d", rec.Code)
 	}
 }
+func TestListPayments(t *testing.T) {
+	svc, _, st := newTestService(t, rail.NewDummy())
+	mux := NewMux(svc)
+	st.CreateIntent(&domain.Intent{ID: "p1", Rail: domain.RailCard, Amount: 1000, Currency: "USD", PayerRef: "payer-1", Status: domain.StatusIntent, CreatedAt: time.Now()})
+	st.CreateIntent(&domain.Intent{ID: "p2", Rail: domain.RailACH, Amount: 2000, Currency: "USD", PayerRef: "payer-2", Status: domain.StatusSettled, CreatedAt: time.Now()})
+
+	rec := doJSON(t, mux, http.MethodGet, "/v1/payments", "", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code=%d", rec.Code)
+	}
+	body := decodeBody(t, rec)
+	payments := body["payments"].([]interface{})
+	if len(payments) != 2 {
+		t.Fatalf("payments=%d want 2", len(payments))
+	}
+
+	rec = doJSON(t, mux, http.MethodGet, "/v1/payments?rail=card", "", nil)
+	body = decodeBody(t, rec)
+	payments = body["payments"].([]interface{})
+	if len(payments) != 1 {
+		t.Fatalf("rail=card filter: got %d want 1", len(payments))
+	}
+
+	rec = doJSON(t, mux, http.MethodGet, "/v1/payments?status=settled", "", nil)
+	body = decodeBody(t, rec)
+	payments = body["payments"].([]interface{})
+	if len(payments) != 1 {
+		t.Fatalf("status=settled filter: got %d want 1", len(payments))
+	}
+}

@@ -316,6 +316,17 @@ func (s *Service) GetIntent(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, i)
 }
 
+// ListPayments handles GET /v1/payments?status=&rail=.
+func (s *Service) ListPayments(w http.ResponseWriter, r *http.Request) {
+	status := r.URL.Query().Get("status")
+	rail := r.URL.Query().Get("rail")
+	intents := s.Store.ListIntents(status, rail)
+	if intents == nil {
+		intents = []*domain.Intent{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"payments": intents})
+}
+
 // --- capture ---
 
 type captureReq struct {
@@ -928,6 +939,7 @@ func NewMux(svc *Service) *http.ServeMux {
 	mux.HandleFunc("GET /healthz", Healthz)
 	mux.HandleFunc("GET /readyz", svc.Readyz)
 	mux.HandleFunc("POST /v1/payments/intents", svc.CreateIntent)
+	mux.HandleFunc("GET /v1/payments", svc.ListPayments)
 	mux.HandleFunc("GET /v1/payments/{id}", svc.GetIntent)
 	mux.HandleFunc("POST /v1/payments/{id}/capture", svc.Capture)
 	mux.HandleFunc("POST /v1/payments/{id}/void", svc.Void)

@@ -2,6 +2,7 @@ package store
 
 import (
 	"errors"
+	"sort"
 	"sync"
 	"time"
 
@@ -49,6 +50,25 @@ func (s *Store) GetIntent(id string) *domain.Intent {
 		return nil
 	}
 	return cloneIntent(i)
+}
+
+// ListIntents returns copies of all intents, optionally filtered by status
+// and rail, ordered by CreatedAt ascending.
+func (s *Store) ListIntents(status string, rail string) []*domain.Intent {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]*domain.Intent, 0, len(s.intents))
+	for _, i := range s.intents {
+		if status != "" && string(i.Status) != status {
+			continue
+		}
+		if rail != "" && string(i.Rail) != rail {
+			continue
+		}
+		out = append(out, cloneIntent(i))
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
+	return out
 }
 
 // UpdateIntent applies fn to the intent with id while holding the write lock,
