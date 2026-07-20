@@ -1,6 +1,8 @@
 package config
 
 import (
+	"fmt"
+	"log"
 	"os"
 	"strconv"
 	"strings"
@@ -10,12 +12,50 @@ import (
 	"github.com/ai-crypto-onramp/payment-orchestration/internal/mtls"
 )
 
+// DevMode reports whether DEV_MODE=1 is set. When true, stub/stand-in clients
+// may be used for local development. When false (production default), missing
+// required env vars are fatal at startup.
+func DevMode() bool { return os.Getenv("DEV_MODE") == "1" }
+
+// MustEnv returns the value of name and logs.Fatalf when it is empty and
+// DEV_MODE!=1. When DEV_MODE=1, an empty value returns "" and a warning is
+// logged.
+func MustEnv(name string) string {
+	v := os.Getenv(name)
+	if v != "" {
+		return v
+	}
+	if DevMode() {
+		log.Printf("DEV_MODE=1: env var %s unset — using stub (NOT FOR PRODUCTION)", name)
+		return ""
+	}
+	log.Fatalf("required env var %s not set and DEV_MODE!=1; refusing to start in production mode", name)
+	return ""
+}
+
+// MustEnvOrFatal is like MustEnv but always fatals when unset and !DEV_MODE,
+// with a custom message indicating the real client is not yet implemented.
+func MustEnvOrFatal(name, msg string) string {
+	v := os.Getenv(name)
+	if v != "" {
+		return v
+	}
+	if DevMode() {
+		log.Printf("DEV_MODE=1: env var %s unset — using stub (NOT FOR PRODUCTION)", name)
+		return ""
+	}
+	if msg == "" {
+		msg = fmt.Sprintf("required env var %s not set and DEV_MODE!=1; refusing to start in production mode", name)
+	}
+	log.Fatal(msg)
+	return ""
+}
+
 // Config is the full environment-derived configuration for the service.
 type Config struct {
 	Port              string
 	RailURLs          map[domain.Rail]string
 	FraudURL          string
-	AuditEventLogURL  string
 	ThreeDSMPIURL     string
 	WebhookSecrets    map[domain.Rail]string
 	WebhookReplayWindow time.Duration
@@ -38,7 +78,6 @@ func FromEnv() Config {
 			domain.RailUPI:  os.Getenv("RAIL_UPI_URL"),
 		},
 		FraudURL:         os.Getenv("FRAUD_URL"),
-		AuditEventLogURL: os.Getenv("AUDIT_EVENT_LOG_URL"),
 		ThreeDSMPIURL:    os.Getenv("THREE_DS_MPI_URL"),
 		WebhookSecrets: map[domain.Rail]string{
 			domain.RailCard: os.Getenv("WEBHOOK_SECRET_CARD"),

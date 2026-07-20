@@ -20,7 +20,7 @@ type Handler func(payload []byte) error
 // pattern: webhooks are persisted to the store before being enqueued for
 // processing, so a crash before processing leaves them to be re-drained.
 type Worker struct {
-	store   *store.Store
+	store   store.Store
 	handler Handler
 	queue   chan domain.Webhook
 	metrics *metrics.Metrics
@@ -32,7 +32,7 @@ type Worker struct {
 
 // New returns a Worker ready to start. The buffer size bounds the in-flight
 // queue depth; the metrics.WebhookBacklog gauge tracks it.
-func New(s *store.Store, h Handler, m *metrics.Metrics, logger *logging.Logger, bufferSize int) *Worker {
+func New(s store.Store, h Handler, m *metrics.Metrics, logger *logging.Logger, bufferSize int) *Worker {
 	if bufferSize <= 0 {
 		bufferSize = 64
 	}

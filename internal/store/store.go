@@ -9,10 +9,26 @@ import (
 	"github.com/ai-crypto-onramp/payment-orchestration/internal/domain"
 )
 
-// Store is a thread-safe in-memory store of payment intents and their
-// associated captures, settlements, refunds, chargebacks, and inbound
-// webhooks.
-type Store struct {
+type Store interface {
+	CreateIntent(i *domain.Intent)
+	GetIntent(id string) *domain.Intent
+	ListIntents(status string, rail string) []*domain.Intent
+	UpdateIntent(id string, fn func(*domain.Intent) error) (*domain.Intent, error)
+	AddCapture(c domain.Capture)
+	CapturesFor(intentID string) []domain.Capture
+	AddSettlement(set domain.Settlement)
+	SettlementsFor(intentID string) []domain.Settlement
+	AddRefund(r domain.Refund)
+	RefundsFor(intentID string) []domain.Refund
+	AddChargeback(c domain.Chargeback)
+	ChargebacksFor(intentID string) []domain.Chargeback
+	UpdateChargeback(caseRef string, fn func(*domain.Chargeback) error) error
+	RecordWebhook(w domain.Webhook) error
+	MarkWebhookProcessed(rail domain.Rail, externalEventID string)
+	WebhookExists(rail domain.Rail, externalEventID string) bool
+}
+
+type MemStore struct {
 	mu          sync.RWMutex
 	intents     map[string]*domain.Intent
 	captures    map[string][]domain.Capture
@@ -22,9 +38,8 @@ type Store struct {
 	webhooks    map[string]domain.Webhook
 }
 
-// New returns an empty in-memory store.
-func New() *Store {
-	return &Store{
+func New() *MemStore {
+	return &MemStore{
 		intents:     make(map[string]*domain.Intent),
 		captures:    make(map[string][]domain.Capture),
 		settlements: make(map[string][]domain.Settlement),
@@ -35,14 +50,14 @@ func New() *Store {
 }
 
 // CreateIntent stores i. It does not check for duplicates.
-func (s *Store) CreateIntent(i *domain.Intent) {
+func (s *MemStore) CreateIntent(i *domain.Intent) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.intents[i.ID] = i
 }
 
 // GetIntent returns a copy of the intent with id, or nil if not found.
-func (s *Store) GetIntent(id string) *domain.Intent {
+func (s *MemStore) GetIntent(id string) *domain.Intent {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	i, ok := s.intents[id]
@@ -54,7 +69,7 @@ func (s *Store) GetIntent(id string) *domain.Intent {
 
 // ListIntents returns copies of all intents, optionally filtered by status
 // and rail, ordered by CreatedAt ascending.
-func (s *Store) ListIntents(status string, rail string) []*domain.Intent {
+func (s *MemStore) ListIntents(status string, rail string) []*domain.Intent {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out := make([]*domain.Intent, 0, len(s.intents))
@@ -74,7 +89,7 @@ func (s *Store) ListIntents(status string, rail string) []*domain.Intent {
 // UpdateIntent applies fn to the intent with id while holding the write lock,
 // persisting the result. Returns the updated intent and the error from fn.
 // If the intent is not found, fn is not called and nil + ErrNotFound is returned.
-func (s *Store) UpdateIntent(id string, fn func(*domain.Intent) error) (*domain.Intent, error) {
+func (s *MemStore) UpdateIntent(id string, fn func(*domain.Intent) error) (*domain.Intent, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	i, ok := s.intents[id]
@@ -88,14 +103,14 @@ func (s *Store) UpdateIntent(id string, fn func(*domain.Intent) error) (*domain.
 }
 
 // AddCapture records a capture linked to an intent.
-func (s *Store) AddCapture(c domain.Capture) {
+func (s *MemStore) AddCapture(c domain.Capture) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.captures[c.IntentID] = append(s.captures[c.IntentID], c)
 }
 
 // CapturesFor returns the captures recorded against an intent.
-func (s *Store) CapturesFor(intentID string) []domain.Capture {
+func (s *MemStore) CapturesFor(intentID string) []domain.Capture {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out := make([]domain.Capture, len(s.captures[intentID]))
@@ -104,14 +119,14 @@ func (s *Store) CapturesFor(intentID string) []domain.Capture {
 }
 
 // AddSettlement records a settlement linked to an intent.
-func (s *Store) AddSettlement(set domain.Settlement) {
+func (s *MemStore) AddSettlement(set domain.Settlement) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.settlements[set.IntentID] = append(s.settlements[set.IntentID], set)
 }
 
 // SettlementsFor returns the settlements recorded against an intent.
-func (s *Store) SettlementsFor(intentID string) []domain.Settlement {
+func (s *MemStore) SettlementsFor(intentID string) []domain.Settlement {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out := make([]domain.Settlement, len(s.settlements[intentID]))
@@ -120,14 +135,14 @@ func (s *Store) SettlementsFor(intentID string) []domain.Settlement {
 }
 
 // AddRefund records a refund linked to an intent.
-func (s *Store) AddRefund(r domain.Refund) {
+func (s *MemStore) AddRefund(r domain.Refund) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.refunds[r.IntentID] = append(s.refunds[r.IntentID], r)
 }
 
 // RefundsFor returns the refunds recorded against an intent.
-func (s *Store) RefundsFor(intentID string) []domain.Refund {
+func (s *MemStore) RefundsFor(intentID string) []domain.Refund {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out := make([]domain.Refund, len(s.refunds[intentID]))
@@ -136,14 +151,14 @@ func (s *Store) RefundsFor(intentID string) []domain.Refund {
 }
 
 // AddChargeback records a chargeback linked to an intent.
-func (s *Store) AddChargeback(c domain.Chargeback) {
+func (s *MemStore) AddChargeback(c domain.Chargeback) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.chargebacks[c.IntentID] = append(s.chargebacks[c.IntentID], c)
 }
 
 // ChargebacksFor returns the chargebacks recorded against an intent.
-func (s *Store) ChargebacksFor(intentID string) []domain.Chargeback {
+func (s *MemStore) ChargebacksFor(intentID string) []domain.Chargeback {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	out := make([]domain.Chargeback, len(s.chargebacks[intentID]))
@@ -152,7 +167,7 @@ func (s *Store) ChargebacksFor(intentID string) []domain.Chargeback {
 }
 
 // UpdateChargeback applies fn to the chargeback with the given case ref.
-func (s *Store) UpdateChargeback(caseRef string, fn func(*domain.Chargeback) error) error {
+func (s *MemStore) UpdateChargeback(caseRef string, fn func(*domain.Chargeback) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for intentID, list := range s.chargebacks {
@@ -167,7 +182,7 @@ func (s *Store) UpdateChargeback(caseRef string, fn func(*domain.Chargeback) err
 
 // RecordWebhook persists a webhook record keyed by (rail, external_event_id).
 // It returns ErrDuplicateWebhook if a record with the same key already exists.
-func (s *Store) RecordWebhook(w domain.Webhook) error {
+func (s *MemStore) RecordWebhook(w domain.Webhook) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	key := webhookKey(w.Rail, w.ExternalEventID)
@@ -180,7 +195,7 @@ func (s *Store) RecordWebhook(w domain.Webhook) error {
 
 // MarkWebhookProcessed records that the webhook with (rail, external_event_id)
 // has been processed.
-func (s *Store) MarkWebhookProcessed(rail domain.Rail, externalEventID string) {
+func (s *MemStore) MarkWebhookProcessed(rail domain.Rail, externalEventID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	key := webhookKey(rail, externalEventID)
@@ -192,7 +207,7 @@ func (s *Store) MarkWebhookProcessed(rail domain.Rail, externalEventID string) {
 
 // WebhookExists reports whether a webhook with the given (rail, external_event_id)
 // has already been recorded.
-func (s *Store) WebhookExists(rail domain.Rail, externalEventID string) bool {
+func (s *MemStore) WebhookExists(rail domain.Rail, externalEventID string) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	_, ok := s.webhooks[webhookKey(rail, externalEventID)]

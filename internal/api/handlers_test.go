@@ -21,7 +21,7 @@ import (
 
 // newTestService returns a service backed by the given dummy adapter and a
 // recorder that captures audit events.
-func newTestService(t *testing.T, dummy *rail.DummyAdapter) (*Service, *audit.Recorder, *store.Store) {
+func newTestService(t *testing.T, dummy *rail.DummyAdapter) (*Service, *audit.Recorder, store.Store) {
 	t.Helper()
 	st := store.New()
 	registry := rail.NewRegistry(dummy)

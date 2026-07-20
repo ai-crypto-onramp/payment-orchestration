@@ -28,7 +28,7 @@ import (
 // Service wires together the store, rail registry, audit sink and idempotency
 // cache, exposing handler methods that operate on *http.Request / ResponseWriter.
 type Service struct {
-	Store           *store.Store
+	Store           store.Store
 	Rails           *rail.Registry
 	Audit           audit.Sink
 	WebhookKeys     map[domain.Rail][]byte
@@ -49,7 +49,7 @@ type idemEntry struct {
 }
 
 // NewService returns a Service ready to serve requests.
-func NewService(s *store.Store, r *rail.Registry, a audit.Sink, webhookKey string) *Service {
+func NewService(s store.Store, r *rail.Registry, a audit.Sink, webhookKey string) *Service {
 	keys := map[domain.Rail][]byte{
 		domain.RailCard: []byte(webhookKey),
 		domain.RailACH:  []byte(webhookKey),

@@ -1,0 +1,7 @@
+DROP TABLE IF EXISTS idempotency_keys;
+DROP TABLE IF EXISTS webhooks;
+DROP TABLE IF EXISTS chargebacks;
+DROP TABLE IF EXISTS refunds;
+DROP TABLE IF EXISTS settlements;
+DROP TABLE IF EXISTS captures;
+DROP TABLE IF EXISTS intents;
