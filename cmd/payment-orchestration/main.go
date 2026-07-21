@@ -13,9 +13,11 @@ import (
 	"github.com/ai-crypto-onramp/payment-orchestration/internal/fraud"
 	"github.com/ai-crypto-onramp/payment-orchestration/internal/logging"
 	"github.com/ai-crypto-onramp/payment-orchestration/internal/mpi"
+	"github.com/ai-crypto-onramp/payment-orchestration/internal/otel"
 	"github.com/ai-crypto-onramp/payment-orchestration/internal/rail"
 	"github.com/ai-crypto-onramp/payment-orchestration/internal/store"
 	"github.com/ai-crypto-onramp/payment-orchestration/internal/store/postgres"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
 
 func main() {
@@ -23,10 +25,16 @@ func main() {
 }
 
 func run() error {
+	shutdown, err := otel.Init("payment-orchestration")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = shutdown(context.Background()) }()
+
 	cfg := config.FromEnv()
 	srv := newService(cfg)
 	mux := api.NewMux(srv)
-	handler := srv.RequestLogMiddleware(mux)
+	handler := otelhttp.NewHandler(srv.RequestLogMiddleware(mux), "payment-orchestration")
 	addr := ":" + cfg.Port
 	return http.ListenAndServe(addr, handler)
 }

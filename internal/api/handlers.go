@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/ai-crypto-onramp/payment-orchestration/internal/audit"
+	"github.com/ai-crypto-onramp/payment-orchestration/internal/authtoken"
 	"github.com/ai-crypto-onramp/payment-orchestration/internal/config"
 	"github.com/ai-crypto-onramp/payment-orchestration/internal/domain"
 	"github.com/ai-crypto-onramp/payment-orchestration/internal/fraud"
@@ -28,15 +29,15 @@ import (
 // Service wires together the store, rail registry, audit sink and idempotency
 // cache, exposing handler methods that operate on *http.Request / ResponseWriter.
 type Service struct {
-	Store           store.Store
-	Rails           *rail.Registry
-	Audit           audit.Sink
-	WebhookKeys     map[domain.Rail][]byte
-	ReplayWindow    time.Duration
-	MPI             mpi.Client
-	Fraud           fraud.Client
-	Metrics         *metrics.Metrics
-	Logger          *logging.Logger
+	Store        store.Store
+	Rails        *rail.Registry
+	Audit        audit.Sink
+	WebhookKeys  map[domain.Rail][]byte
+	ReplayWindow time.Duration
+	MPI          mpi.Client
+	Fraud        fraud.Client
+	Metrics      *metrics.Metrics
+	Logger       *logging.Logger
 
 	idemMu    sync.Mutex
 	idemCache map[string]idemEntry
@@ -58,16 +59,16 @@ func NewService(s store.Store, r *rail.Registry, a audit.Sink, webhookKey string
 		domain.RailUPI:  []byte(webhookKey),
 	}
 	return &Service{
-		Store:       s,
-		Rails:       r,
-		Audit:       a,
-		WebhookKeys: keys,
+		Store:        s,
+		Rails:        r,
+		Audit:        a,
+		WebhookKeys:  keys,
 		ReplayWindow: 5 * time.Minute,
-		MPI:         mpi.NewDummy(),
-		Fraud:       fraud.NewDummy(),
-		Metrics:     metrics.New(),
-		Logger:      logging.New(io.Discard, logging.LevelInfo),
-		idemCache:   make(map[string]idemEntry),
+		MPI:          mpi.NewDummy(),
+		Fraud:        fraud.NewDummy(),
+		Metrics:      metrics.New(),
+		Logger:       logging.New(io.Discard, logging.LevelInfo),
+		idemCache:    make(map[string]idemEntry),
 	}
 }
 
@@ -604,7 +605,7 @@ func (s *Service) is3DSExpired(i *domain.Intent) bool {
 // --- webhooks ---
 
 type webhookBody struct {
-	PaymentID      string `json:"payment_id"`
+	PaymentID       string `json:"payment_id"`
 	Type            string `json:"type"`
 	ExternalEventID string `json:"external_event_id"`
 	Timestamp       int64  `json:"timestamp"`
@@ -934,7 +935,7 @@ func (s *Service) RequestLogMiddleware(next http.Handler) http.Handler {
 }
 
 // NewMux builds the HTTP routing mux for the service.
-func NewMux(svc *Service) *http.ServeMux {
+func NewMux(svc *Service) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", Healthz)
 	mux.HandleFunc("GET /readyz", svc.Readyz)
@@ -949,7 +950,8 @@ func NewMux(svc *Service) *http.ServeMux {
 	if svc.Metrics != nil {
 		mux.Handle("GET /metrics", svc.Metrics.Handler())
 	}
-	return mux
+	secret, bypass := authtoken.SecretFromEnv()
+	return authtoken.Middleware(secret, bypass)(mux)
 }
 
 // --- helpers for tests ---

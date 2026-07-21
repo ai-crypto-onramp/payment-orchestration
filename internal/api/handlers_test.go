@@ -30,7 +30,7 @@ func newTestService(t *testing.T, dummy *rail.DummyAdapter) (*Service, *audit.Re
 	return svc, rec, st
 }
 
-func doJSON(t *testing.T, mux *http.ServeMux, method, path, idemKey string, body interface{}) *httptest.ResponseRecorder {
+func doJSON(t *testing.T, mux http.Handler, method, path, idemKey string, body interface{}) *httptest.ResponseRecorder {
 	t.Helper()
 	var r io.Reader
 	if body != nil {
